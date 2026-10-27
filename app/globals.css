@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+body {
+  background: #f4f4f5;
+  color: #18181b;
+  font-family:
+    "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, -apple-system, sans-serif;
+}
+
+.maplibregl-popup-content {
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.18);
+}
