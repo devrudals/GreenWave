@@ -1,80 +1,119 @@
 import { connection, type NextRequest } from "next/server";
 import { INTERSECTIONS, INTERSECTION_BY_ID } from "@/constants/intersections";
 import { simulateAll } from "@/lib/mock";
-import { ageTo, fetchTDataSignals, RateLimitError, type ObservedSignal } from "@/lib/tdata";
+import { kstDay, msUntilKstMidnight, signalStore, type Snapshot, type Usage } from "@/lib/signalCache";
+import { ageTo, fetchDistrict, RateLimitError } from "@/lib/tdata";
 import type { SignalsResponse } from "@/lib/types";
 
-// 여러 클라이언트가 동시에 폴링해도 T-Data는 짧은 주기로 한 번만 호출한다
-const CACHE_TTL_MS = 2000;
-let cache: { at: number; signals: ObservedSignal[] } | null = null;
-let blockedUntil = 0;
-let lastError: string | null = null;
-let inflight: Promise<void> | null = null;
+/** 하루 1,000회 한도 중 실제로 쓸 양 (로컬 개발·재시도 여유분 제외) */
+const DAILY_BUDGET = Number(process.env.TDATA_DAILY_BUDGET) || 900;
+/** 남은 한도가 넉넉해도 이보다 자주 호출하지 않는다 */
+const MIN_GAP_MS = 15_000;
+/** 한 요청에서 갱신 대상으로 받는 구 수 상한 */
+const MAX_DISTRICTS = 4;
+const READ_CACHE_MS = 2000;
 
-// 시드에 구 코드가 있으면 구 단위로 묶어 조회하고, 없는 교차로만 개별 조회한다 (demo- 예시 ID는 제외)
+// demo- 예시 ID는 실시간 조회 대상이 아니다
 const REAL = INTERSECTIONS.filter((i) => !i.itstId.startsWith("demo-"));
-const TARGETS = {
-  sggCds: [...new Set(REAL.flatMap((i) => (i.sggCd ? [i.sggCd] : [])))],
-  itstIds: REAL.filter((i) => !i.sggCd).map((i) => i.itstId),
-};
+const SEED_DISTRICTS = new Set(REAL.flatMap((i) => (i.sggCd ? [i.sggCd] : [])));
 
-function mockResponse(ids: string[] | undefined, fallbackReason?: string): SignalsResponse {
+let readCache: { at: number; snapshots: Snapshot[] } | null = null;
+let inflight: Promise<void> | null = null;
+let lastError: string | null = null;
+
+function mockResponse(fallbackReason?: string): SignalsResponse {
   const now = Date.now();
-  return { source: "mock", fetchedAt: now, signals: simulateAll(now, ids), fallbackReason };
+  return { source: "mock", fetchedAt: now, signals: simulateAll(now), fallbackReason };
 }
 
-async function refresh(apiKey: string) {
+async function recentSnapshots(): Promise<Snapshot[]> {
+  if (readCache && Date.now() - readCache.at < READ_CACHE_MS) return readCache.snapshots;
+  const snapshots = await signalStore.recent();
+  readCache = { at: Date.now(), snapshots };
+  return snapshots;
+}
+
+/** 남은 한도를 자정까지 고르게 쓰도록 호출 간격을 정한다 */
+function pacingGapMs(usage: Usage, now: number): number {
+  const left = DAILY_BUDGET - usage.calls;
+  return left <= 0 ? Infinity : Math.max(MIN_GAP_MS, msUntilKstMidnight(now) / left);
+}
+
+/** 요청된 구 중 가장 오래된 것 하나를, 한도와 간격이 허락할 때만 갱신한다 */
+async function maybeRefresh(apiKey: string, requested: string[], snapshots: Snapshot[], usage: Usage) {
+  const now = Date.now();
+  if (now < usage.blockedUntil || now - usage.lastCallAt < pacingGapMs(usage, now)) return;
+
+  const fetchedAt = (sgg: string) => snapshots.find((s) => s.sggCd === sgg)?.fetchedAt ?? 0;
+  const target = [...requested].sort((a, b) => fetchedAt(a) - fetchedAt(b))[0];
+  if (!target || now - fetchedAt(target) < MIN_GAP_MS) return;
+
+  const day = kstDay(now);
+  // 인스턴스 간 중복 호출을 줄이려고 호출 전에 먼저 기록한다
+  await signalStore.recordCall(day, now);
   try {
-    cache = { at: Date.now(), signals: await fetchTDataSignals(apiKey, TARGETS) };
+    const signals = await fetchDistrict(apiKey, target);
+    await signalStore.save({ sggCd: target, fetchedAt: now, signals });
+    readCache = null;
     lastError = null;
   } catch (err) {
-    if (err instanceof RateLimitError) blockedUntil = err.retryAt;
+    if (err instanceof RateLimitError) await signalStore.block(day, err.retryAt);
     lastError = err instanceof Error ? err.message : String(err);
     console.warn("[signals] T-Data 호출 실패:", lastError);
   }
 }
 
-async function loadAll(): Promise<SignalsResponse> {
-  const apiKey = process.env.TDATA_API_KEY;
-  if (process.env.SIGNAL_MODE === "mock" || !apiKey) {
-    return mockResponse(undefined, apiKey ? undefined : "TDATA_API_KEY 미설정");
-  }
-  if (REAL.length === 0) {
-    return mockResponse(undefined, "교차로 시드가 예시 데이터임 (npm run build:intersections 로 생성 필요)");
-  }
-
-  const now = Date.now();
-  const stale = !cache || now - cache.at >= CACHE_TTL_MS;
-  if (stale && now >= blockedUntil) {
-    await (inflight ??= refresh(apiKey).finally(() => (inflight = null)));
-  }
-  if (!cache) return mockResponse(undefined, lastError ?? "T-Data 데이터 없음");
-
-  // 지도에 표시할 수 있는(시드에 좌표가 있는) 교차로만 내려준다
-  const matched = cache.signals.filter((s) => INTERSECTION_BY_ID.has(s.itstId));
-  if (matched.length === 0) {
-    return mockResponse(undefined, `수신된 실시간 교차로 ${cache.signals.length}곳 중 시드 좌표와 매칭되는 곳이 없음`);
-  }
-
-  const fetchedAt = Date.now();
-  return {
-    source: "tdata",
-    fetchedAt,
-    observedAt: Math.min(...matched.map((s) => s.observedAt)),
-    signals: matched.map((s) => ageTo(s, fetchedAt)),
-    fallbackReason: lastError ?? undefined,
-  };
-}
-
 export async function GET(request: NextRequest) {
   await connection();
   const params = request.nextUrl.searchParams;
-  const ids = params.get("ids")?.split(",").filter(Boolean);
+  const apiKey = process.env.TDATA_API_KEY;
 
-  const data = params.get("mode") === "mock" ? mockResponse(undefined) : await loadAll();
-  const body: SignalsResponse = ids
-    ? { ...data, signals: data.signals.filter((s) => ids.includes(s.itstId)) }
-    : data;
+  if (params.get("mode") === "mock" || process.env.SIGNAL_MODE === "mock" || !apiKey) {
+    return Response.json(mockResponse(apiKey ? undefined : "TDATA_API_KEY 미설정"));
+  }
+  if (REAL.length === 0) {
+    return Response.json(mockResponse("교차로 시드가 예시 데이터임 (npm run build:intersections 로 생성 필요)"));
+  }
 
+  const requested = (params.get("sgg")?.split(",") ?? [])
+    .filter((s) => SEED_DISTRICTS.has(s))
+    .slice(0, MAX_DISTRICTS);
+
+  let snapshots = await recentSnapshots();
+  let usage = await signalStore.usage(kstDay());
+  if (requested.length > 0) {
+    await (inflight ??= maybeRefresh(apiKey, requested, snapshots, usage).finally(() => (inflight = null)));
+    snapshots = await recentSnapshots();
+    usage = await signalStore.usage(kstDay());
+  }
+
+  const now = Date.now();
+  const observed = snapshots.flatMap((s) => s.signals).filter((s) => INTERSECTION_BY_ID.has(s.itstId));
+  const blocked = now < usage.blockedUntil;
+  const gap = pacingGapMs(usage, now);
+  const quota = {
+    used: usage.calls,
+    limit: DAILY_BUDGET,
+    intervalSec: Number.isFinite(gap) ? Math.round(gap / 1000) : null,
+  };
+  const resumeAt = new Date(usage.blockedUntil).toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul" });
+  const blockedReason = `T-Data 일일 호출 한도 초과 (${resumeAt} 이후 재개)`;
+
+  if (observed.length === 0 && (blocked || lastError)) {
+    return Response.json({ ...mockResponse(blocked ? blockedReason : (lastError ?? undefined)), quota });
+  }
+
+  const body: SignalsResponse = {
+    source: "tdata",
+    fetchedAt: now,
+    observedAt: observed.length ? Math.min(...observed.map((s) => s.observedAt)) : undefined,
+    signals: observed.map((s) => ageTo(s, now)),
+    fallbackReason: blocked
+      ? `${blockedReason} · 마지막 수신값 표시 중`
+      : observed.length === 0
+        ? "지도를 확대하거나 구간을 선택하면 해당 구의 실시간 신호를 불러옵니다"
+        : (lastError ?? undefined),
+    quota,
+  };
   return Response.json(body, { headers: { "Cache-Control": "no-store" } });
 }

@@ -24,7 +24,7 @@ export interface ObservedSignal extends SignalTiming {
 /** T-Data가 반복 호출 제한(429)으로 거절했을 때 */
 export class RateLimitError extends Error {
   constructor(public retryAt: number) {
-    super(`T-Data 호출 제한 (${new Date(retryAt).toLocaleTimeString("ko-KR")} 이후 재호출 가능)`);
+    super(`T-Data 호출 제한 (${new Date(retryAt).toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul" })} 이후 재호출 가능)`);
   }
 }
 
@@ -66,11 +66,15 @@ function normalize(record: RawRecord): ObservedSignal | null {
   const vehicle: DirectionTimes = {};
   const pedestrianPhase: DirectionPhases = {};
   const vehiclePhase: DirectionPhases = {};
+  // 값이 있는 방향만 담아 캐시 크기를 줄인다 (없는 방향은 undefined = 신호 없음)
+  const put = <T,>(target: Partial<Record<string, T>>, d: string, v: T | null) => {
+    if (v !== null) target[d] = v;
+  };
   for (const d of DIRECTIONS) {
-    pedestrian[d] = toTenths(record[`${d}PdsgRmdrCs`]);
-    vehicle[d] = toTenths(record[`${d}StsgRmdrCs`]);
-    pedestrianPhase[d] = toPhase(record[`${d}PdsgStatNm`]);
-    vehiclePhase[d] = toPhase(record[`${d}StsgStatNm`]);
+    put(pedestrian, d, toTenths(record[`${d}PdsgRmdrCs`]));
+    put(vehicle, d, toTenths(record[`${d}StsgRmdrCs`]));
+    put(pedestrianPhase, d, toPhase(record[`${d}PdsgStatNm`]));
+    put(vehiclePhase, d, toPhase(record[`${d}StsgStatNm`]));
   }
   return {
     itstId: String(record.itstId),
@@ -94,7 +98,9 @@ async function fetchPage(apiKey: string, filter: { sggCd: string } | { itstId: s
   const json = await res.json().catch(() => null);
 
   if (res.status === 429) {
-    const retryAfter = Number((json as { retryAfterSeconds?: unknown })?.retryAfterSeconds);
+    // 일일 호출 한도(1,000회)는 { headers: { "X-RateLimit-Reset": 초 } }, 반복 호출 제한은 retryAfterSeconds로 온다
+    const body = json as { retryAfterSeconds?: unknown; headers?: Record<string, unknown> } | null;
+    const retryAfter = Number(body?.headers?.["X-RateLimit-Reset"] ?? body?.retryAfterSeconds);
     throw new RateLimitError(Date.now() + (Number.isFinite(retryAfter) ? retryAfter : 300) * 1000);
   }
   if (!res.ok) {
@@ -104,32 +110,16 @@ async function fetchPage(apiKey: string, filter: { sggCd: string } | { itstId: s
   return extractRecords(json);
 }
 
-/**
- * 구(sggCd) 단위로 한 번에 조회하고, 구 코드를 모르는 교차로만 개별 조회한다.
- * 일부 요청이 실패해도 성공한 결과는 쓰고, 전부 실패하면 첫 오류를 던진다.
- */
-export async function fetchTDataSignals(
-  apiKey: string,
-  targets: { sggCds: string[]; itstIds: string[] },
-): Promise<ObservedSignal[]> {
-  const filters = [
-    ...targets.sggCds.map((sggCd) => ({ sggCd })),
-    ...targets.itstIds.map((itstId) => ({ itstId })),
-  ];
-  const results = await Promise.allSettled(filters.map((f) => fetchPage(apiKey, f)));
-  const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
-  if (failures.length === results.length) throw failures[0]?.reason ?? new Error("조회 대상 없음");
-
+/** 한 구의 교차로별 최신 신호. 60초보다 오래된 레코드는 버린다 */
+export async function fetchDistrict(apiKey: string, sggCd: string): Promise<ObservedSignal[]> {
+  const rows = await fetchPage(apiKey, { sggCd });
   const now = Date.now();
   const latest = new Map<string, ObservedSignal>();
-  for (const r of results) {
-    if (r.status !== "fulfilled") continue;
-    for (const raw of r.value) {
-      const s = normalize(raw);
-      if (!s || now - s.observedAt > STALE_MS) continue;
-      const prev = latest.get(s.itstId);
-      if (!prev || s.observedAt >= prev.observedAt) latest.set(s.itstId, s);
-    }
+  for (const raw of rows) {
+    const s = normalize(raw);
+    if (!s || now - s.observedAt > STALE_MS) continue;
+    const prev = latest.get(s.itstId);
+    if (!prev || s.observedAt >= prev.observedAt) latest.set(s.itstId, s);
   }
   return [...latest.values()];
 }
@@ -139,11 +129,12 @@ function shift(times: DirectionTimes, phases: DirectionPhases | undefined, elaps
   const outPhases: DirectionPhases = {};
   for (const d of DIRECTIONS) {
     const v = times[d];
-    // 이미 끝난 신호(1초 이상 지남)는 다음 현시를 알 수 없으므로 비운다
+    // 이미 끝난 신호(1초 이상 지남)는 다음 현시를 알 수 없으므로 비운다.
     // 잔여시간을 모르는 방향(null)은 상태만 유지한다
     const expired = v != null && v - elapsedTenths < -10;
-    outTimes[d] = v == null || expired ? null : Math.max(0, v - elapsedTenths);
-    outPhases[d] = expired ? null : (phases?.[d] ?? null);
+    if (v != null && !expired) outTimes[d] = Math.max(0, v - elapsedTenths);
+    const phase = phases?.[d];
+    if (phase && !expired) outPhases[d] = phase;
   }
   return [outTimes, outPhases] as const;
 }

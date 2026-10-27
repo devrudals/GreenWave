@@ -45,8 +45,10 @@ export interface SignalsResponse {
   signals: SignalTiming[];
   /** T-Data 원본이 송신된 시각 (가장 오래된 교차로 기준, epoch ms). 잔여시간은 이미 fetchedAt 기준으로 보정됨 */
   observedAt?: number;
-  /** Mock으로 대체된 이유, 또는 캐시 데이터를 쓰는 중일 때 마지막 호출 오류 */
+  /** Mock으로 대체된 이유, 또는 실시간 데이터에 대한 안내 (한도·오류 등) */
   fallbackReason?: string;
+  /** T-Data 일일 호출 한도 사용 현황. intervalSec = 현재 허용되는 호출 간격 */
+  quota?: { used: number; limit: number; intervalSec: number | null };
 }
 
 export interface CustomRoute {

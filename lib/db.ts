@@ -148,3 +148,6 @@ if (databaseUrl && !usableUrl) {
 export const routeRepo: RouteRepo = usableUrl ? neonRepo(usableUrl) : memoryRepo();
 
 export const storageMode = usableUrl ? "neon" : "memory";
+
+/** 신호 캐시 등 다른 서버 모듈이 같은 DB를 쓸 때 사용 */
+export const sqlClient = usableUrl ? neon(usableUrl) : null;

@@ -12,7 +12,9 @@ interface Snapshot {
   receivedAt: number;
 }
 
-export function useSignals() {
+/** @param districts 실시간 갱신이 필요한 구 코드 (화면에 보이는 구, 선택한 구간의 구) */
+export function useSignals(districts: string[]) {
+  const districtKey = districts.join(",");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(0); // 프리렌더 시점 시각이 고정되지 않도록 첫 tick에서 채운다
@@ -27,7 +29,8 @@ export function useSignals() {
       controller?.abort();
       controller = new AbortController();
       try {
-        const res = await fetch("/api/signals", { cache: "no-store", signal: controller.signal });
+        const query = districtKey ? `?sgg=${districtKey}` : "";
+        const res = await fetch(`/api/signals${query}`, { cache: "no-store", signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: SignalsResponse = await res.json();
         if (!cancelled) {
@@ -52,7 +55,8 @@ export function useSignals() {
       clearInterval(id);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, []);
+    // 조회할 구가 바뀌면 즉시 다시 받는다
+  }, [districtKey]);
 
   // 폴링 사이 1초 카운트다운 보간
   useEffect(() => {
@@ -70,6 +74,8 @@ export function useSignals() {
     elapsedMs: snapshot ? Math.max(0, now - snapshot.receivedAt) : 0,
     source: snapshot?.data.source ?? null,
     fallbackReason: snapshot?.data.fallbackReason,
+    quota: snapshot?.data.quota,
+    observedAt: snapshot?.data.observedAt,
     lastUpdated: snapshot?.receivedAt ?? null,
     error,
   };

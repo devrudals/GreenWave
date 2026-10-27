@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { INTERSECTIONS, INTERSECTION_BY_ID } from "@/constants/intersections";
 import { remainingSeconds, representative, toneOf } from "@/lib/signal";
+import { WATCH_MIN_ZOOM, type Bounds } from "@/lib/districts";
 import type { Intersection, SignalTiming } from "@/lib/types";
 import { SignalDetail } from "./SignalDetail";
 
@@ -19,8 +20,8 @@ const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const SEOUL_CENTER: [number, number] = [126.978, 37.5446];
 const SOURCE_ID = "gw-intersections";
 const CIRCLE_LAYER = "gw-circle";
-// 숫자는 이 줌부터 표시한다 (그 아래에서는 신호색 점만)
-const LABEL_MIN_ZOOM = 13;
+// 숫자는 이 줌부터 표시한다 (그 아래에서는 신호색 점만). 실시간 갱신 시작 줌과 맞춘다
+const LABEL_MIN_ZOOM = WATCH_MIN_ZOOM;
 
 // 번들러가 MapLibre 워커 파일을 함께 내보내지 못하므로 public/에 복사한 파일을 쓴다 (npm run copy-worker)
 setWorkerUrl("/maplibre-gl-worker.mjs");
@@ -38,9 +39,15 @@ interface Props {
   highlightIds: string[];
   fitTarget: FitTarget | null;
   onToggleSelect: (id: string) => void;
+  onViewportChange?: (viewport: Bounds) => void;
 }
 
 type FeatureState = Pick<Props, "signals" | "elapsedMs" | "selecting" | "selectedIds" | "highlightIds">;
+
+function viewportOf(map: MapLibreMap): Bounds {
+  const b = map.getBounds();
+  return { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth(), zoom: map.getZoom() };
+}
 
 /** 교차로 수천 곳을 DOM 마커 대신 GeoJSON 레이어로 그린다. 매초 이 데이터만 다시 넣는다 */
 function buildFeatures({ signals, elapsedMs, selecting, selectedIds, highlightIds }: FeatureState) {
@@ -129,6 +136,7 @@ export default function MapView({
   highlightIds,
   fitTarget,
   onToggleSelect,
+  onViewportChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -141,7 +149,9 @@ export default function MapView({
   // 지도 이벤트 핸들러가 항상 최신 props를 보도록 ref로 전달
   const stateRef = useRef<FeatureState>({ signals, elapsedMs, selecting, selectedIds, highlightIds });
   const clickRef = useRef<(id: string) => void>(() => {});
+  const viewportRef = useRef(onViewportChange);
   useEffect(() => {
+    viewportRef.current = onViewportChange;
     stateRef.current = { signals, elapsedMs, selecting, selectedIds, highlightIds };
     clickRef.current = (id) => {
       if (selecting) onToggleSelect(id);
@@ -150,7 +160,7 @@ export default function MapView({
     // 1초마다(보간) 또는 선택이 바뀔 때 레이어 데이터 갱신
     const source = mapRef.current?.getSource<GeoJSONSource>(SOURCE_ID);
     source?.setData(buildFeatures(stateRef.current));
-  }, [signals, elapsedMs, selecting, selectedIds, highlightIds, onToggleSelect]);
+  }, [signals, elapsedMs, selecting, selectedIds, highlightIds, onToggleSelect, onViewportChange]);
 
   // 지도는 한 번만 만든다
   useEffect(() => {
@@ -164,7 +174,12 @@ export default function MapView({
     map.addControl(new NavigationControl({ showCompass: false }), "top-right");
     mapRef.current = map;
 
-    map.on("load", () => addLayers(map, stateRef.current));
+    map.on("load", () => {
+      addLayers(map, stateRef.current);
+      viewportRef.current?.(viewportOf(map));
+    });
+    // 화면에 보이는 구만 실시간 갱신하도록 상위에 알린다
+    map.on("moveend", () => viewportRef.current?.(viewportOf(map)));
     map.on("click", CIRCLE_LAYER, (e) => {
       const id = e.features?.[0]?.properties?.itstId;
       if (typeof id === "string") clickRef.current(id);

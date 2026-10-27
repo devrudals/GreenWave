@@ -2,9 +2,10 @@
 
 import { ChevronDown, ChevronUp, Plus, Radio, TrafficCone } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toInput, useRoutes } from "@/hooks/useRoutes";
 import { useSignals } from "@/hooks/useSignals";
+import { districtsToWatch, type Bounds } from "@/lib/districts";
 import type { CustomRoute } from "@/lib/types";
 import { FocusBoard } from "./FocusBoard";
 import type { FitTarget } from "./MapView";
@@ -19,7 +20,6 @@ const MapView = dynamic(() => import("./MapView"), {
 type Mode = { kind: "browse" } | { kind: "create" } | { kind: "edit"; route: CustomRoute };
 
 export function GreenWaveApp() {
-  const signals = useSignals();
   const { routes, storage, loading, error: routesError, create, update, remove } = useRoutes();
 
   const [mode, setMode] = useState<Mode>({ kind: "browse" });
@@ -27,9 +27,21 @@ export function GreenWaveApp() {
   const [activeId, setActiveId] = useState<number | null>(null);
   const [fitTarget, setFitTarget] = useState<FitTarget | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
+  const [viewport, setViewport] = useState<Bounds | null>(null);
 
   const selecting = mode.kind !== "browse";
   const activeRoute = routes.find((r) => r.id === activeId) ?? null;
+
+  // T-Data 하루 호출 한도 때문에 보고 있는 구만 실시간으로 갱신한다
+  const watchedDistricts = useMemo(
+    () =>
+      districtsToWatch(
+        viewport,
+        selecting ? selectedIds : (activeRoute?.intersections.map((i) => i.itstId) ?? []),
+      ),
+    [viewport, selecting, selectedIds, activeRoute],
+  );
+  const signals = useSignals(watchedDistricts);
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
@@ -98,6 +110,7 @@ export function GreenWaveApp() {
         highlightIds={activeRoute?.intersections.map((i) => i.itstId) ?? []}
         fitTarget={fitTarget}
         onToggleSelect={toggleSelect}
+        onViewportChange={setViewport}
       />
 
       {/* 사이드바 (모바일: 바텀시트) */}
@@ -118,9 +131,18 @@ export function GreenWaveApp() {
           </button>
         </header>
 
+        {panelOpen && signals.source === "tdata" && signals.quota && (
+          <p className="border-b border-zinc-100 px-4 py-1.5 text-[11px] text-zinc-500">
+            T-Data 오늘 호출 {signals.quota.used}/{signals.quota.limit}회
+            {signals.quota.intervalSec !== null && ` · 약 ${signals.quota.intervalSec}초마다 갱신`}
+            {signals.observedAt &&
+              signals.lastUpdated &&
+              ` · 가장 오래된 값 ${Math.max(0, Math.round((signals.lastUpdated + signals.elapsedMs - signals.observedAt) / 1000))}초 전`}
+          </p>
+        )}
         {panelOpen && signals.fallbackReason && (
           <p className="border-b border-zinc-100 bg-zinc-50 px-4 py-2 text-[11px] leading-snug text-zinc-500">
-            {signals.source === "mock" ? "시뮬레이션 사용 중 · " : "최근 수신값 사용 중 · "}
+            {signals.source === "mock" && "시뮬레이션 사용 중 · "}
             {signals.fallbackReason}
           </p>
         )}
