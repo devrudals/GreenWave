@@ -33,6 +33,8 @@ export interface FitTarget {
 
 interface Props {
   signals: Map<string, SignalTiming>;
+  /** 실시간 값이 없어 시뮬레이션으로 채운 교차로 */
+  simulatedIds: Set<string>;
   elapsedMs: number;
   selecting: boolean;
   selectedIds: string[];
@@ -42,7 +44,7 @@ interface Props {
   onViewportChange?: (viewport: Bounds) => void;
 }
 
-type FeatureState = Pick<Props, "signals" | "elapsedMs" | "selecting" | "selectedIds" | "highlightIds">;
+type FeatureState = Pick<Props, "signals" | "simulatedIds" | "elapsedMs" | "selecting" | "selectedIds" | "highlightIds">;
 
 function viewportOf(map: MapLibreMap): Bounds {
   const b = map.getBounds();
@@ -50,7 +52,7 @@ function viewportOf(map: MapLibreMap): Bounds {
 }
 
 /** 교차로 수천 곳을 DOM 마커 대신 GeoJSON 레이어로 그린다. 매초 이 데이터만 다시 넣는다 */
-function buildFeatures({ signals, elapsedMs, selecting, selectedIds, highlightIds }: FeatureState) {
+function buildFeatures({ signals, simulatedIds, elapsedMs, selecting, selectedIds, highlightIds }: FeatureState) {
   const highlighted = new Set(highlightIds);
   return {
     type: "FeatureCollection" as const,
@@ -68,6 +70,7 @@ function buildFeatures({ signals, elapsedMs, selecting, selectedIds, highlightId
           order: order >= 0 ? String(order + 1) : "",
           marked: order >= 0 || highlighted.has(itst.itstId),
           dimmed: selecting && order < 0,
+          simulated: simulatedIds.has(itst.itstId),
         },
       };
     }),
@@ -92,8 +95,9 @@ function addLayers(map: MapLibreMap, state: FeatureState) {
       ],
       "circle-stroke-color": ["case", ["get", "marked"], "#18181b", "#ffffff"],
       "circle-stroke-width": ["case", ["get", "marked"], 3, 1.5],
-      "circle-opacity": ["case", ["get", "dimmed"], 0.45, 1],
-      "circle-stroke-opacity": ["case", ["get", "dimmed"], 0.45, 1],
+      // 시뮬레이션 값은 옅게 그려 실시간 값과 구분한다
+      "circle-opacity": ["case", ["get", "dimmed"], 0.45, ["get", "simulated"], 0.4, 1],
+      "circle-stroke-opacity": ["case", ["get", "dimmed"], 0.45, ["get", "simulated"], 0.4, 1],
     },
   });
   map.addLayer({
@@ -130,6 +134,7 @@ function addLayers(map: MapLibreMap, state: FeatureState) {
 
 export default function MapView({
   signals,
+  simulatedIds,
   elapsedMs,
   selecting,
   selectedIds,
@@ -147,12 +152,12 @@ export default function MapView({
   const [popupId, setPopupId] = useState<string | null>(null);
 
   // 지도 이벤트 핸들러가 항상 최신 props를 보도록 ref로 전달
-  const stateRef = useRef<FeatureState>({ signals, elapsedMs, selecting, selectedIds, highlightIds });
+  const stateRef = useRef<FeatureState>({ signals, simulatedIds, elapsedMs, selecting, selectedIds, highlightIds });
   const clickRef = useRef<(id: string) => void>(() => {});
   const viewportRef = useRef(onViewportChange);
   useEffect(() => {
     viewportRef.current = onViewportChange;
-    stateRef.current = { signals, elapsedMs, selecting, selectedIds, highlightIds };
+    stateRef.current = { signals, simulatedIds, elapsedMs, selecting, selectedIds, highlightIds };
     clickRef.current = (id) => {
       if (selecting) onToggleSelect(id);
       else setPopupId(id);
@@ -160,7 +165,7 @@ export default function MapView({
     // 1초마다(보간) 또는 선택이 바뀔 때 레이어 데이터 갱신
     const source = mapRef.current?.getSource<GeoJSONSource>(SOURCE_ID);
     source?.setData(buildFeatures(stateRef.current));
-  }, [signals, elapsedMs, selecting, selectedIds, highlightIds, onToggleSelect, onViewportChange]);
+  }, [signals, simulatedIds, elapsedMs, selecting, selectedIds, highlightIds, onToggleSelect, onViewportChange]);
 
   // 지도는 한 번만 만든다
   useEffect(() => {
@@ -247,7 +252,12 @@ export default function MapView({
       {popupContainer &&
         popupItst &&
         createPortal(
-          <SignalDetail intersection={popupItst} signal={signals.get(popupItst.itstId)} elapsedMs={elapsedMs} />,
+          <SignalDetail
+            intersection={popupItst}
+            signal={signals.get(popupItst.itstId)}
+            simulated={simulatedIds.has(popupItst.itstId)}
+            elapsedMs={elapsedMs}
+          />,
           popupContainer,
         )}
     </>

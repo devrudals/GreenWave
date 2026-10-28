@@ -28,17 +28,12 @@ export function kstDay(now = Date.now()): string {
   return new Date(now + 9 * 3600_000).toISOString().slice(0, 10);
 }
 
-export function msUntilKstMidnight(now = Date.now()): number {
-  const kst = now + 9 * 3600_000;
-  return 86_400_000 - (kst % 86_400_000);
-}
-
 interface Store {
   recent(): Promise<Snapshot[]>;
   save(snapshot: Snapshot): Promise<void>;
   usage(day: string): Promise<Usage>;
-  /** 호출 1회를 기록하고 갱신된 사용량을 돌려준다 */
-  recordCall(day: string, at: number): Promise<Usage>;
+  /** 호출 n회를 기록하고 갱신된 사용량을 돌려준다 */
+  recordCalls(day: string, n: number, at: number): Promise<Usage>;
   block(day: string, until: number): Promise<void>;
 }
 
@@ -90,11 +85,11 @@ function neonStore(sql: NonNullable<typeof sqlClient>): Store {
       const rows = await sql`SELECT calls, last_call_at, blocked_until FROM tdata_usage WHERE day = ${day}`;
       return toUsage(rows[0]);
     },
-    async recordCall(day, at) {
+    async recordCalls(day, n, at) {
       await ensure();
       const rows = await sql`
-        INSERT INTO tdata_usage (day, calls, last_call_at) VALUES (${day}, 1, ${at})
-        ON CONFLICT (day) DO UPDATE SET calls = tdata_usage.calls + 1, last_call_at = EXCLUDED.last_call_at
+        INSERT INTO tdata_usage (day, calls, last_call_at) VALUES (${day}, ${n}, ${at})
+        ON CONFLICT (day) DO UPDATE SET calls = tdata_usage.calls + ${n}, last_call_at = EXCLUDED.last_call_at
         RETURNING calls, last_call_at, blocked_until`;
       return toUsage(rows[0]);
     },
@@ -122,8 +117,8 @@ function memoryStore(): Store {
     async usage(day) {
       return get(day);
     },
-    async recordCall(day, at) {
-      const u = { ...get(day), calls: get(day).calls + 1, lastCallAt: at };
+    async recordCalls(day, n, at) {
+      const u = { ...get(day), calls: get(day).calls + n, lastCallAt: at };
       usage.set(day, u);
       return u;
     },

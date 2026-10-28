@@ -14,11 +14,13 @@ const TONE_STYLE: Record<Tone, string> = {
 export function FocusBoard({
   route,
   signals,
+  simulatedIds,
   elapsedMs,
   onClose,
 }: {
   route: CustomRoute;
   signals: Map<string, SignalTiming>;
+  simulatedIds: Set<string>;
   elapsedMs: number;
   onClose: () => void;
 }) {
@@ -58,6 +60,7 @@ export function FocusBoard({
               </p>
               <p className="mt-1 text-[11px] font-semibold">
                 {rep.phase && sec !== null ? `${rep.kind} ${PHASE_LABELS[rep.phase]}` : "\u00a0"}
+                {simulatedIds.has(itst.itstId) && " · 시뮬레이션"}
               </p>
               <p className="mb-1 text-5xl font-black tabular-nums leading-none">
                 {sec ?? "--"}

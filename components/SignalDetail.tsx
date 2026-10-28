@@ -39,10 +39,12 @@ function Cell({
 export function SignalDetail({
   intersection,
   signal,
+  simulated,
   elapsedMs,
 }: {
   intersection: Intersection;
   signal: SignalTiming | undefined;
+  simulated: boolean;
   elapsedMs: number;
 }) {
   const directions = DIRECTIONS.filter(
@@ -58,6 +60,11 @@ export function SignalDetail({
       <div className="mb-2">
         <p className="text-sm font-bold">{intersection.itstNm}</p>
         <p className="text-[11px] text-zinc-500">교차로 ID {intersection.itstId}</p>
+        {simulated && (
+          <p className="mt-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600">
+            시뮬레이션 값입니다. 지도를 확대하면 실시간 값으로 바뀝니다.
+          </p>
+        )}
       </div>
       {directions.length === 0 ? (
         <p className="py-2 text-xs text-zinc-500">수신된 신호 정보가 없습니다.</p>
